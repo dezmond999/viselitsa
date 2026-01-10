@@ -12,6 +12,8 @@ TOKEN = "8460606222:AAHr7WMYE8souR3Fr7_QWhuHQ8TuPOB-HZI"
 MAX_ERRORS = 6
 with open("russian.txt", encoding="utf-8") as f:
     WORDS = [w.strip().lower() for w in f if w.strip().isalpha()]
+    HARD_WORDS = [w for w in WORDS if len(w) >= 9]
+
 HANGMAN = [
     "",
     "😐",
@@ -52,6 +54,15 @@ CREATE TABLE IF NOT EXISTS games_log (
     win INTEGER,
     errors INTEGER,
     guessed_letters INTEGER
+)
+""")
+db.commit()
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS achievements (
+    user_id INTEGER,
+    code TEXT,
+    date TEXT,
+    UNIQUE(user_id, code)
 )
 """)
 db.commit()
@@ -117,7 +128,56 @@ def log_game(user_id, win, errors, guessed_letters):
     """, (user_id, today, win, errors, guessed_letters))
     db.commit()
 
+ACHIEVEMENTS = {
+    "first_win": "🥉 Первая кровь — первая победа",
+    "no_errors": "🥉 Без ошибок — победа без ошибок",
+    "letters_10": "🥉 Буквоед — 10 угаданных букв за игру",
+
+    "hard_win": "🥈 Хардкорщик — победа в сложном режиме",
+    "streak_5": "🥈 Серия — 5 побед подряд",
+
+    "perfect_hard": "🥇 Идеал — hard + 0 ошибок",
+    "letters_30_total": "🥇 Алфавит — 100 букв суммарно"
+}
+def has_achievement(user_id, code):
+    cursor.execute(
+        "SELECT 1 FROM achievements WHERE user_id=? AND code=?",
+        (user_id, code)
+    )
+    return cursor.fetchone() is not None
+
+
+def give_achievement(user_id, code):
+    if has_achievement(user_id, code):
+        return False
+
+    cursor.execute(
+        "INSERT INTO achievements (user_id, code, date) VALUES (?, ?, ?)",
+        (user_id, code, date.today().isoformat())
+    )
+    db.commit()
+    return True
 # ================== КОМАНДЫ ==================
+@dp.message(F.text == "/achievements")
+async def achievements(message: Message):
+    user_id = message.from_user.id
+
+    cursor.execute(
+        "SELECT code FROM achievements WHERE user_id=?",
+        (user_id,)
+    )
+    owned = {row[0] for row in cursor.fetchall()}
+
+    text = "🏆 Достижения:\n\n"
+
+    for code, title in ACHIEVEMENTS.items():
+        if code in owned:
+            text += f"✅ {title}\n"
+        else:
+            text += f"🔒 {title}\n"
+
+    await message.answer(text)
+
 @dp.message(F.text == "/week_top")
 async def week_top(message: Message):
     cursor.execute("""
@@ -224,10 +284,15 @@ async def start(message: Message):
     await message.answer(
         "🎮 Виселица\n\n"
         "/new — новая игра\n"
+        "/hard — сложный режим(х1.5)\n"
         "/daily — ежедневное слово\n"
-        "/stats — статистика\n\n"
-        "Пиши по ОДНОЙ букве\n\n"
-        "/top — рейтинг\n"
+        "/stats — статистика\n"
+        "/achievements — достижения\n\n"
+        
+        "Пиши по одной букве или сразу целое слово!\n\n"
+        "/top — рейтинг за всё время\n"
+        "/week_top — рейтинг за неделю\n"
+        "/month_top — рейтинг за месяц\n"
     )
 
 
@@ -241,6 +306,8 @@ async def new_game(message: Message):
         "wrong": set(),
         "errors": 0,
         "daily": False,
+        "mode": "normal",
+        "max_errors": MAX_ERRORS,
         "guessed_letters": 0
     }
 
@@ -249,6 +316,31 @@ async def new_game(message: Message):
         f"{masked_word(word, set())}"
     )
 
+@dp.message(F.text == "/hard")
+async def hard_game(message: Message):
+    if not HARD_WORDS:
+        await message.answer("❌ Нет слов для сложного режима")
+        return
+
+    word = random.choice(HARD_WORDS)
+
+    games[message.from_user.id] = {
+        "word": word,
+        "guessed": set(),
+        "wrong": set(),
+        "errors": 0,
+        "daily": False,
+        "mode": "hard",
+        "max_errors": 5,
+        "guessed_letters": 0
+    }
+
+    await message.answer(
+        "🔥 СЛОЖНЫЙ РЕЖИМ\n"
+        "Слова от 9 букв\n"
+        "Ошибок меньше, награды больше\n\n"
+        f"{masked_word(word, set())}"
+    )
 
 @dp.message(F.text == "/daily")
 async def daily(message: Message):
@@ -268,6 +360,8 @@ async def daily(message: Message):
         "wrong": set(),
         "errors": 0,
         "daily": True,
+        "mode": "normal",
+        "max_errors": MAX_ERRORS,
         "guessed_letters": 0
     }
 
@@ -317,8 +411,52 @@ async def guess_word(message: Message):
 
     # ✅ попытка угадать слово
     if text == word:
+        unique_letters = set(word)
+        game["guessed_letters"] += len(unique_letters)
         update_stats(user_id, True)
         log_game(user_id, 1, game["errors"], game["guessed_letters"])
+        new_achievements = []
+        cursor.execute("""
+            SELECT COALESCE(SUM(guessed_letters), 0)
+            FROM games_log
+            WHERE user_id = ?
+        """, (user_id,))
+
+        total_letters = cursor.fetchone()[0]
+
+        if total_letters >= 100:
+            if give_achievement(user_id, "letters_30_total"):
+                new_achievements.append("🥇 Алфавит")
+        # первая победа
+        user = get_user(user_id)
+        if user[2] == 1:
+            if give_achievement(user_id, "first_win"):
+                new_achievements.append("🥉 Первая кровь")
+
+        # без ошибок
+        if game["errors"] == 0:
+            if give_achievement(user_id, "no_errors"):
+                new_achievements.append("🥉 Без ошибок")
+
+        # 10 букв за игру
+        if game["guessed_letters"] >= 10:
+            if give_achievement(user_id, "letters_10"):
+                new_achievements.append("🥉 Буквоед")
+
+        # hard win
+        if game["mode"] == "hard":
+            if give_achievement(user_id, "hard_win"):
+                new_achievements.append("🥈 Хардкорщик")
+
+        # идеал
+        if game["mode"] == "hard" and game["errors"] == 0:
+            if give_achievement(user_id, "perfect_hard"):
+                new_achievements.append("🥇 Идеал")
+
+        # серия
+        if user[4] >= 5:
+            if give_achievement(user_id, "streak_5"):
+                new_achievements.append("🥈 Серия")
 
         if game["daily"]:
             cursor.execute(
@@ -328,6 +466,10 @@ async def guess_word(message: Message):
             db.commit()
 
         del games[user_id]
+        if new_achievements:
+            text = "🏅 Новые достижения:\n"
+            for a in new_achievements:
+                text += f"• {a}\n"
         await message.answer(f"🎉 Победа!\nСлово: {game['word']}\nНапиши /new для новой игры или /start для выхода в главное меню")
     else:
         update_stats(user_id, False)
@@ -356,7 +498,7 @@ def render_game(game):
         f"{word_view}\n\n"
         f"❌ Ошибочные буквы:\n"
         f"{wrong_letters}\n\n"
-        f"💥 Ошибок: {game['errors']} / {MAX_ERRORS}"
+        f"💥 Ошибок: {game['errors']} / {game['max_errors']}"
     )
 # ================== ВВОД БУКВ ==================
 @dp.message(F.text.len() == 1)
@@ -393,6 +535,48 @@ async def letter(message: Message):
     if "_" not in word_view:
         update_stats(user_id, True)
         log_game(user_id, 1, game["errors"], game["guessed_letters"])
+        new_achievements = []
+        cursor.execute("""
+            SELECT COALESCE(SUM(guessed_letters), 0)
+            FROM games_log
+            WHERE user_id = ?
+        """, (user_id,))
+
+        total_letters = cursor.fetchone()[0]
+
+        if total_letters >= 100:
+            if give_achievement(user_id, "letters_30_total"):
+                new_achievements.append("🥇 Алфавит")
+        # первая победа
+        user = get_user(user_id)
+        if user[2] == 1:
+            if give_achievement(user_id, "first_win"):
+                new_achievements.append("🥉 Первая кровь")
+
+        # без ошибок
+        if game["errors"] == 0:
+            if give_achievement(user_id, "no_errors"):
+                new_achievements.append("🥉 Без ошибок")
+
+        # 10 букв за игру
+        if game["guessed_letters"] >= 10:
+            if give_achievement(user_id, "letters_10"):
+                new_achievements.append("🥉 Буквоед")
+
+        # hard win
+        if game["mode"] == "hard":
+            if give_achievement(user_id, "hard_win"):
+                new_achievements.append("🥈 Хардкорщик")
+
+        # идеал
+        if game["mode"] == "hard" and game["errors"] == 0:
+            if give_achievement(user_id, "perfect_hard"):
+                new_achievements.append("🥇 Идеал")
+
+        # серия
+        if user[4] >= 5:
+            if give_achievement(user_id, "streak_5"):
+                new_achievements.append("🥈 Серия")
 
         if game["daily"]:
             cursor.execute(
@@ -402,11 +586,20 @@ async def letter(message: Message):
             db.commit()
 
         del games[user_id]
-        await message.answer(f"🎉 Победа!\nСлово: {game['word']}\nНапиши /new для новой игры или /start для выхода в главное меню")
+        text = f"🎉 Победа!\nСлово: {game['word']}\n"
+
+        if new_achievements:
+            text += "\n🏅 Новые достижения:\n"
+            for a in new_achievements:
+                text += f"• {a}\n"
+
+        text += "\nНапиши /new для новой игры или /start для выхода в меню"
+
+        await message.answer(text)
         return
 
     # ПОРАЖЕНИЕ
-    if game["errors"] >= MAX_ERRORS:
+    if game["errors"] >= game["max_errors"]:
         update_stats(user_id, False)
         log_game(user_id, 0, game["errors"], game["guessed_letters"])
 
