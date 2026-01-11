@@ -2,6 +2,10 @@ import asyncio
 import random
 import sqlite3
 import hashlib
+import duel
+from duel import cancel_duel_search
+from duel import handle_duel_input
+
 from datetime import date
 
 from aiogram import Bot, Dispatcher, F
@@ -27,7 +31,7 @@ HANGMAN = [
 # ================== БОТ ==================
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-
+duel.register_duel_handlers(dp, bot, WORDS)
 games = {}  # user_id -> game_state
 
 # ================== БАЗА ДАННЫХ ==================
@@ -222,6 +226,29 @@ def get_chain_progress(chain, value):
 
 
 # ================== КОМАНДЫ ==================
+@dp.message(F.text == "/start")
+async def start(message: Message):
+    ensure_profile(
+        message.from_user.id,
+        message.from_user.full_name
+    )
+    await message.answer(
+        "🎮 Виселица\n\n"
+        "/profile — профиль\n"
+        "/new — новая игра\n"
+        "/hard — сложный режим(х1.5)\n\n"
+        "/daily — ежедневное слово\n"
+        "/stats — статистика\n"
+        "/achievements — достижения\n\n"
+        "/duel — случайная дуэль\n"
+        "/duel @username — вызов на дуэль\n\n"
+        
+        "Пиши по одной букве или сразу целое слово!\n\n"
+        "/top — рейтинг за всё время\n"
+        "/week_top — рейтинг за неделю\n"
+        "/month_top — рейтинг за месяц\n"
+    )
+
 @dp.message(F.text == "/profile")
 async def profile(message: Message):
     user = get_user(message.from_user.id)
@@ -424,28 +451,6 @@ def ensure_profile(user_id, tg_name):
             (tg_name, user_id)
         )
     db.commit()
-
-@dp.message(F.text == "/start")
-async def start(message: Message):
-    ensure_profile(
-        message.from_user.id,
-        message.from_user.full_name
-    )
-    await message.answer(
-        "🎮 Виселица\n\n"
-        "/profile — профиль\n"
-        "/new — новая игра\n"
-        "/hard — сложный режим(х1.5)\n"
-        "/daily — ежедневное слово\n"
-        "/stats — статистика\n"
-        "/achievements — достижения\n\n"
-        
-        "Пиши по одной букве или сразу целое слово!\n\n"
-        "/top — рейтинг за всё время\n"
-        "/week_top — рейтинг за неделю\n"
-        "/month_top — рейтинг за месяц\n"
-    )
-
 
 @dp.message(F.text == "/new")
 async def new_game(message: Message):
@@ -748,7 +753,19 @@ async def letter(message: Message):
 
     await message.answer(render_game(game))
 
+@dp.message(F.text.startswith("/"), F.text != "/duel")
+async def command_intercept(message: Message):
+    user_id = message.from_user.id
 
+    if cancel_duel_search(user_id):
+        await message.answer("❌ Поиск дуэли отменён")
+
+
+@dp.message(F.text & ~F.text.startswith("/"))
+async def duel_intercept(message: Message):
+    handled = await handle_duel_input(bot, message)
+    if handled:
+        return
 # ================== ЗАПУСК ==================
 async def main():
     await dp.start_polling(bot)
